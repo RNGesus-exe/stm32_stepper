@@ -61,6 +61,8 @@ void Error_Handler(void);
 #define LED_GPIO_Port GPIOC
 #define DIR_Pin GPIO_PIN_9
 #define DIR_GPIO_Port GPIOA
+#define PROXIMITY_SENSOR_Pin GPIO_PIN_10
+#define PROXIMITY_SENSOR_GPIO_Port GPIOA
 
 /* USER CODE BEGIN Private defines */
 #define BUFSIZE 200

@@ -49,21 +49,20 @@
 
 /* USER CODE BEGIN PV */
 
-// NOTE: The following variables are hard coded
-enum MODES{START, ACCELERATE, CRUISE, DECCELERATE, STOP};
 const double DIST_PER_STEP = 0.0028; // mm/step
-const uint32_t MIN_VELOCITY = 14000;
-const uint32_t MAX_VELOCITY= 10000;
-const uint32_t RAMP_UP_STEPS = 500;
-const uint32_t STEP_SIZE = (MIN_VELOCITY - MAX_VELOCITY)/RAMP_UP_STEPS;
+uint32_t MIN_VELOCITY = 14000; // Initial velocity of stepper
+uint32_t MAX_VELOCITY= 10000; // Final velocity of stepper
 
+uint32_t RAMP_UP_STEPS = 500;
+uint32_t STEP_SIZE = 0;
+
+enum MODES{START, ACCELERATE, CRUISE, DECCELERATE, STOP};
 uint8_t mode = STOP;
 
-volatile uint32_t t1Count=0;
+volatile uint32_t t1Count = 0;
 volatile uint32_t cum_ticks = 0;
 volatile uint32_t curr_ticks = 0;
-uint32_t curr_velocity = 14000; // steps
-uint32_t debug_speed=MIN_VELOCITY;
+uint32_t curr_velocity = 0;
 
 // NOTE: startStepper handles the initialization for these variables
 uint32_t dist_ticks = 0;
@@ -88,66 +87,54 @@ void SystemClock_Config(void);
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 
+	t1Count++;
+
 	switch(mode){
 		case STOP:
-			htim->Instance->ARR = debug_speed;
+			htim->Instance->ARR = MIN_VELOCITY;
 			htim->Instance->CCR1 = 0;
 			curr_ticks = 0;
 			break;
 		case START:
-			htim->Instance->ARR = debug_speed;
-			htim->Instance->CCR1 = debug_speed/2;
-			if(curr_ticks++ >= dist_ticks){
+			cum_ticks = 0;
+			curr_ticks = 0;
+			curr_velocity = MIN_VELOCITY;
+			mode = ACCELERATE;
+			break;
+		case ACCELERATE:
+			if(curr_velocity > MAX_VELOCITY && ++curr_ticks <= acc_ticks){
+				curr_velocity -= STEP_SIZE;
+			}
+			else if (cruise_ticks > 0){
+				mode = CRUISE;
+				curr_ticks = 0;
+			}
+			else{
+				mode = DECCELERATE;
+				curr_ticks = 0;
+			}
+			break;
+		case CRUISE:
+			if(++curr_ticks >= cruise_ticks){
+				mode = DECCELERATE;
+				curr_ticks = 0;
+			}
+			break;
+		case DECCELERATE:
+			if(curr_velocity < MIN_VELOCITY && ++curr_ticks <= dec_ticks){
+				curr_velocity += STEP_SIZE;
+			}
+			else{
 				mode = STOP;
 			}
+			break;
 	}
 
-//	t1Count++;
-//
-//	switch(mode){
-//		case STOP:
-//			htim->Instance->ARR = MIN_VELOCITY;
-//			htim->Instance->CCR1 = 0;
-//			break;
-//		case START:
-//			cum_ticks = 0;
-//			curr_ticks = 0;
-//			mode = ACCELERATE;
-//			break;
-//		case ACCELERATE:
-//			if(curr_velocity > MAX_VELOCITY && ++curr_ticks <= acc_ticks){
-//				curr_velocity -= STEP_SIZE;
-//			}
-//			else if (cruise_ticks > 0){
-//				mode = CRUISE;
-//				curr_ticks = 0;
-//			}
-//			else{
-//				mode = DECCELERATE;
-//				curr_ticks = 0;
-//			}
-//			break;
-//		case CRUISE:
-//			if(++curr_ticks >= cruise_ticks){
-//				mode = DECCELERATE;
-//				curr_ticks = 0;
-//			}
-//			break;
-//		case DECCELERATE:
-//			if(curr_velocity < MIN_VELOCITY && ++curr_ticks <= dec_ticks){
-//				curr_velocity += STEP_SIZE;
-//			}
-//			else{
-//				mode = STOP;
-//			}
-//			break;
-//	}
-//
-//	if(mode != STOP){
-//		cum_ticks++;
-//		htim->Instance->ARR = curr_velocity;
-//		htim->Instance->CCR1 = curr_velocity/2;
-//	}
+	if(mode != STOP){
+		cum_ticks++;
+		htim->Instance->ARR = curr_velocity;
+		htim->Instance->CCR1 = curr_velocity/2;
+	}
 }
 
 /**
@@ -185,26 +172,28 @@ void startStepper(uint8_t dir, double dist){
 }
 
 /**
- * debugStepper - Moves stepper in dir for n ticks
+ * debugStepper - Moves stepper in dir for n ticks at vel speed
  *
  * @dir: direction of stepper (0: Clockwise, 1: Anti-clockwise)
  *
  * @ticks: Amount of ticks to move
+ *
+ * @vel: top speed of motor in Hz/s
  */
 void debugStepper(uint8_t dir, int ticks, uint32_t vel){
 
 	dist_ticks = ticks;
-	debug_speed = vel;
+	MAX_VELOCITY = vel;
 
-	// Cruise Decision
-//	if(dist_ticks >= 2*RAMP_UP_STEPS){
-//		cruise_ticks = (dist_ticks - 2*RAMP_UP_STEPS);
-//		dec_ticks = acc_ticks = RAMP_UP_STEPS;
-//	}
-//	else{
-//		cruise_ticks = 0;
-//		dec_ticks = acc_ticks = dist_ticks/2;
-//	}
+	//Cruise Decision
+	if(dist_ticks >= 2*RAMP_UP_STEPS){
+		cruise_ticks = (dist_ticks - 2*RAMP_UP_STEPS);
+		dec_ticks = acc_ticks = RAMP_UP_STEPS;
+	}
+	else{
+		cruise_ticks = 0;
+		dec_ticks = acc_ticks = dist_ticks/2;
+	}
 
 	// Direction to move
 	if(dir==0){
@@ -322,7 +311,7 @@ int main(void)
   /* MCU Configuration--------------------------------------------------------*/
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
-	HAL_Init();
+  HAL_Init();
 
   /* USER CODE BEGIN Init */
 
@@ -343,8 +332,11 @@ int main(void)
 
   // Stepper motor won't be rotating in the beginning
   htim1.Instance->PSC=11;
-  htim1.Instance->ARR=curr_velocity;
+  htim1.Instance->ARR=MIN_VELOCITY;
   htim1.Instance->CCR1=0;
+
+  // Compute interval for ramping up and ramping down
+  STEP_SIZE = (MIN_VELOCITY - MAX_VELOCITY)/RAMP_UP_STEPS;
 
   // Start Timer 1 Callback
   HAL_TIM_Base_Start_IT(&htim1);
@@ -355,10 +347,6 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-
-
-//  HAL_Delay(10000);
-
   char* a = NULL;
   while (1)
   {
@@ -366,6 +354,10 @@ int main(void)
 		  ProcessCommand(SRCom.buf);
 		  SRCom.state = 0;
 	  }
+    /* USER CODE END WHILE */
+
+
+    /* USER CODE BEGIN 3 */
   }
   /* USER CODE END 3 */
 }
