@@ -77,6 +77,21 @@ typedef struct{
 	int bpointer;
 	int state;
 } com;
+
+typedef struct{
+	GPIO_PinState dir;
+	uint32_t acc_ticks;
+	uint32_t dec_ticks;
+	uint32_t cruise_ticks;
+	uint32_t vel; // Only for debugging
+} motion_profile;
+
+typedef struct{
+	motion_profile buf[BUFSIZE];
+	int head;
+	int tail;
+} mpque;
+
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus

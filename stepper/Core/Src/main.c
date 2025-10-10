@@ -64,15 +64,14 @@ volatile uint32_t cum_ticks = 0;
 volatile uint32_t curr_ticks = 0;
 uint32_t curr_velocity = 0;
 
-// NOTE: startStepper handles the initialization for these variables
-uint32_t dist_ticks = 0;
-uint32_t cruise_ticks = 0;
-uint32_t acc_ticks = 0;
-uint32_t dec_ticks = 0;
+enum DIRECTIONS{AWAY, HOME};
+GPIO_PinState prox_sens = GPIO_PIN_SET;
 
 sque usb={0};
-
 com SRCom={0};
+
+mpque motion_profiles={0};
+motion_profile curr_mp={};
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -89,11 +88,30 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 
 	t1Count++;
 
+	// If Proximity Sensor triggered don't do anything
+	prox_sens = HAL_GPIO_ReadPin(PROXIMITY_SENSOR_GPIO_Port, PROXIMITY_SENSOR_Pin);
+	if(curr_mp.dir == HOME && prox_sens == GPIO_PIN_RESET){
+		mode = STOP;
+	}
+
 	switch(mode){
 		case STOP:
+			if(!readMotionProfile(&curr_mp)){
+				break;
+			}
+
+			// Reset max_velocity to {MAX_VELOCITY} if none provided
+			if(!curr_mp.vel){
+				curr_mp.vel = MAX_VELOCITY;
+			}
+
+			// Set Direction
+			HAL_GPIO_WritePin(DIR_GPIO_Port, DIR_Pin, curr_mp.dir);
+
 			htim->Instance->ARR = MIN_VELOCITY;
 			htim->Instance->CCR1 = 0;
 			curr_ticks = 0;
+			mode = START;
 			break;
 		case START:
 			cum_ticks = 0;
@@ -102,10 +120,10 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 			mode = ACCELERATE;
 			break;
 		case ACCELERATE:
-			if(curr_velocity > MAX_VELOCITY && ++curr_ticks <= acc_ticks){
+			if(curr_velocity > curr_mp.vel && ++curr_ticks <= curr_mp.acc_ticks){
 				curr_velocity -= STEP_SIZE;
 			}
-			else if (cruise_ticks > 0){
+			else if (curr_mp.cruise_ticks > 0){
 				mode = CRUISE;
 				curr_ticks = 0;
 			}
@@ -115,13 +133,13 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 			}
 			break;
 		case CRUISE:
-			if(++curr_ticks >= cruise_ticks){
+			if(++curr_ticks >= curr_mp.cruise_ticks){
 				mode = DECCELERATE;
 				curr_ticks = 0;
 			}
 			break;
 		case DECCELERATE:
-			if(curr_velocity < MIN_VELOCITY && ++curr_ticks <= dec_ticks){
+			if(curr_velocity < MIN_VELOCITY && ++curr_ticks <= curr_mp.dec_ticks){
 				curr_velocity += STEP_SIZE;
 			}
 			else{
@@ -137,6 +155,26 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 	}
 }
 
+uint8_t insertMotionProfile(motion_profile *mp){
+	if((motion_profiles.tail+1)%BUFSIZE == motion_profiles.head){
+		return 0;
+	}
+
+	motion_profiles.buf[motion_profiles.tail++] = *mp;
+	motion_profiles.tail%=BUFSIZE;
+	return 1;
+}
+
+int readMotionProfile(motion_profile *mp){
+	if(motion_profiles.head == motion_profiles.tail){
+		return 0;
+	}
+
+	*mp = motion_profiles.buf[motion_profiles.head++];
+	motion_profiles.head%=BUFSIZE;
+	return 1;
+}
+
 /**
  * startStepper - Converts dist (mm) into ticks and starts stepper in dir.
  *
@@ -144,31 +182,27 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
  *
  * @dist: Amount of distance to move in mm
  */
-void startStepper(uint8_t dir, double dist){
+void startStepper(GPIO_PinState dir, double dist){
+
+	motion_profile mp = {};
 
 	// Convert mm to ticks
-	dist_ticks = dist/DIST_PER_STEP;
+	uint32_t dist_ticks = dist/DIST_PER_STEP;
 
 	// Cruise Decision
 	if(dist_ticks >= 2*RAMP_UP_STEPS){
-		cruise_ticks = (dist_ticks - 2*RAMP_UP_STEPS);
-		dec_ticks = acc_ticks = RAMP_UP_STEPS;
+		mp.cruise_ticks = (dist_ticks - 2*RAMP_UP_STEPS);
+		mp.dec_ticks = mp.acc_ticks = RAMP_UP_STEPS;
 	}
 	else{
-		cruise_ticks = 0;
-		dec_ticks = acc_ticks = dist_ticks/2;
+		mp.cruise_ticks = 0;
+		mp.dec_ticks = mp.acc_ticks = dist_ticks/2;
 	}
 
 	// Direction to move
-	if(dir==0){
-		HAL_GPIO_WritePin(DIR_GPIO_Port, DIR_Pin, GPIO_PIN_SET);
-	}
-	else{
-		HAL_GPIO_WritePin(DIR_GPIO_Port, DIR_Pin, GPIO_PIN_RESET);
-	}
+	mp.dir = dir;
 
-	// Give signal to timer to start stepper
-	mode = START;
+	insertMotionProfile(&mp);
 }
 
 /**
@@ -180,31 +214,27 @@ void startStepper(uint8_t dir, double dist){
  *
  * @vel: top speed of motor in Hz/s
  */
-void debugStepper(uint8_t dir, int ticks, uint32_t vel){
+void debugStepper(uint8_t dir, uint32_t ticks, uint32_t vel){
 
-	dist_ticks = ticks;
-	MAX_VELOCITY = vel;
+	motion_profile mp = {};
+
+	// Override MAX_VELOCITY
+	mp.vel = vel;
 
 	//Cruise Decision
-	if(dist_ticks >= 2*RAMP_UP_STEPS){
-		cruise_ticks = (dist_ticks - 2*RAMP_UP_STEPS);
-		dec_ticks = acc_ticks = RAMP_UP_STEPS;
+	if(ticks >= 2*RAMP_UP_STEPS){
+		mp.cruise_ticks = (ticks - 2*RAMP_UP_STEPS);
+		mp.dec_ticks = mp.acc_ticks = RAMP_UP_STEPS;
 	}
 	else{
-		cruise_ticks = 0;
-		dec_ticks = acc_ticks = dist_ticks/2;
+		mp.cruise_ticks = 0;
+		mp.dec_ticks = mp.acc_ticks = ticks/2;
 	}
 
 	// Direction to move
-	if(dir==0){
-		HAL_GPIO_WritePin(DIR_GPIO_Port, DIR_Pin, GPIO_PIN_SET);
-	}
-	else{
-		HAL_GPIO_WritePin(DIR_GPIO_Port, DIR_Pin, GPIO_PIN_RESET);
-	}
+	mp.dir = dir;
 
-	// Give signal to timer to start stepper
-	mode = START;
+	insertMotionProfile(&mp);
 }
 
 void SendString(char* buf){
@@ -294,6 +324,18 @@ char* ComProcess() {
   return NULL;
 }
 
+void calibrate(){
+	// Check if you are already in home or not
+	prox_sens = HAL_GPIO_ReadPin(PROXIMITY_SENSOR_GPIO_Port, PROXIMITY_SENSOR_Pin);
+	if(prox_sens == GPIO_PIN_RESET){
+		// Move Stepper out of home
+		startStepper(AWAY, 10);
+	}
+
+	// The stepper will be moved towards home until it triggers the proximity sensor
+	startStepper(HOME, 10000);
+}
+
 
 /* USER CODE END 0 */
 
@@ -343,6 +385,10 @@ int main(void)
 
   // Start PWM on TIM2 CH1
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
+
+  // Calibration
+  calibrate();
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
